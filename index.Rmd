@@ -1,0 +1,109 @@
+---
+title: "PML Project--Prediction of Weightlifting type by Motion Measurement"
+output: html_document
+---
+### Summary
+This is the course project in the Practical Machine Learning course on Coursera. The data are the WLE data set from Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013. In this project, I choose relevant variables based on exploratory plots and choose a suitable model using a subset of data. Then I re-derive the model using more data and validate its accuracy.
+### Loading Data and Packages
+For simplicity I downloaded data to local storage and load from there.
+```{r, warning=FALSE, message=FALSE}
+pml <- read.csv("pml-training.csv")
+pml_test <- read.csv("pml-testing.csv")
+library(ggplot2)
+library(cowplot)
+library(caret)
+library(parallel)
+library(doParallel)
+```
+### Data Cleaning and Exploratory analysis
+```{r}
+dim(pml)
+dim(pml_test)
+colnames(pml)[!colnames(pml)==colnames(pml_test)]
+colnames(pml_test)[!colnames(pml)==colnames(pml_test)]
+```
+The test set and the training set contain the same number of variables. In the training set the classe variable is the result and it is replaced by the problem_id in the testing set.
+```{r}
+sum(colSums(is.na(pml))>0)
+sum(colSums(is.na(pml_test))>0)
+```
+There are many variables within each set with NAs. Further
+```{r}
+sum(colSums(is.na(pml_test))==dim(pml_test)[1])
+```
+The variables with NAs in the testing set are only NAs for all 20 observations. This means I can use the testing set to select columns with no NAs for both datasets:
+```{r}
+pml <- pml[colSums(!is.na(pml_test))>0]
+pml_test <- pml_test[colSums(!is.na(pml_test))>0]
+sum(colSums(is.na(pml))>0)
+```
+Now no variable in the training or testing sets contains NAs. The training set can be passed to machine learning modeling. Before that, it is necessary to take a look at how these variables are related to each other and remove useless, redundant or interfering variables.
+```{r}
+colnames(pml)
+colnames(pml)[!(sapply(pml, class)=="numeric" | sapply(pml, class)=="integer")]
+```
+In the remaining 60 variables, classe is the result. Variables 1-7 are more registry related and some of them are not numbers. Variables 8-59 are measured metrics by equipment.
+```{r}
+p1 <- qplot(pml$classe, pml$X)
+p2 <- ggplot(data=pml, aes(user_name)) + geom_bar(aes(fill=classe), position = "fill")
+p3 <- ggplot(data=pml, aes(raw_timestamp_part_1, colour=classe)) + geom_density()
+p4 <- ggplot(data=pml, aes(raw_timestamp_part_2, colour=classe)) + geom_density()
+p5 <- qplot(pml$user_name, pml$cvtd_timestamp)
+p6 <- ggplot(data=pml, aes(new_window)) + geom_bar(aes(fill=classe), position = "fill")
+plot_grid(p1, p2, p3, p4, p5, p6, labels=c("1A", "1B", "1C", "1D", "1E", "1F"), ncol = 2, nrow = 3)
+```
+
+Fig.1A shows the relationship between X and classe. X could be a good predictor. However, X in the testing set shows that it is just for serial number. So the correlation in Fig.A is just since classe is ordered and followed by X.
+```{r}
+pml_test$X
+```
+Fig.1B shows that all users did similar proportion of motions. This also applies to the new\_window variable in Fig.1F. Figs.1C&1D show the two raw timestamp variables are not good predictors. Fig.1E shows that the variable cvtd\_timestamp is dependent on users, so it is not a good predictor.
+```{r}
+p1 <- qplot(pml$classe, pml$num_window)
+p2 <- qplot(pml$classe, pml$roll_belt)
+plot_grid(p1, p2, labels=c("2A", "2B"), ncol = 2, nrow = 1)
+```
+
+By contrast, the other variables could be predictors as shown in Fig.2A&2B. Therefore, I will use Variables 7 to 59 to predict classe.
+```{r}
+pml <- pml[,-(1:6)]
+pml_test <- pml_test[,-(1:6)]
+```
+### Model Selection and Construction
+Since the predicted variable is categorical, I will compare radom forest versus boosted trees. I will use a small subset of all observations to make this comparison. To further decrease run time, I will use parallel computing and 5 fold cross validation suggested by the mentors.
+```{r, message=FALSE, warning=FALSE}
+set.seed(1)
+cluster <- makeCluster(detectCores() - 1)
+registerDoParallel(cluster)
+fitControl <- trainControl(method = "cv", number = 5, allowParallel = TRUE)
+inComparison <- createDataPartition(pml$classe, p = 0.1, list=FALSE)
+pmlCom <- pml[inComparison,]
+inTrainCom <- createDataPartition(pmlCom$classe, p = 0.5, list=FALSE)
+pmlCom_training <- pmlCom[inTrainCom,]
+pmlCom_testing <- pmlCom[-inTrainCom,]
+rfCom <- train(classe~., method="rf", data=pmlCom_training, trControl=fitControl)
+gbmCom <- train(classe~., method="gbm", data=pmlCom_training, trControl=fitControl, verbose=FALSE)
+```
+The in and out of sample errors are as follows:
+```{r}
+confusionMatrix(predict(rfCom, pmlCom_training), pmlCom_training$classe)$overall[1]
+confusionMatrix(predict(gbmCom, pmlCom_training), pmlCom_training$classe)$overall[1]
+confusionMatrix(predict(rfCom, pmlCom_testing), pmlCom_testing$classe)$overall[1]
+confusionMatrix(predict(gbmCom, pmlCom_testing), pmlCom_testing$classe)$overall[1]
+```
+Although both models have perfect in-sample prediction, the random forest model has better out-of-sample prediction. So I will apply it to the large data set.
+```{r, message=FALSE, warning=FALSE, cache=TRUE}
+inTrain <- createDataPartition(pml$classe, p = 0.75, list=FALSE)
+pml_training <- pml[inTrain,]
+pml_testing <- pml[-inTrain,]
+rfmod <- train(classe~., method="rf", data=pml_training, trControl=fitControl)
+confusionMatrix(predict(rfmod, pml_testing), pml_testing$classe)$overall[1]
+stopCluster(cluster)
+```
+The out-of-sample accuracy is over 0.99.
+
+### Prediction
+Using this model, the predicted result in the testing set is:
+```{r}
+predict(rfmod, pml_test)
+```
